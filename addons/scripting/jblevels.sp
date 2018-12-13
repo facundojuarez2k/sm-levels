@@ -5,6 +5,7 @@
 	To do:
 		>Optimize database sync queries
 		>Admin menu
+		>Level-up sounds
 ************************************************************************************/
 
 #pragma semicolon 1
@@ -17,20 +18,24 @@
 #include <chat-processor>
 
 #define PLUGIN_VERSION "0.1.2"
-#define PLUGIN_CHAT_PREFIX "{darkred}[JBLevels]"
+#define PLUGIN_CHAT_PREFIX "{darkred}[JBLevels]{default}"
 #define PLUGIN_CHAT_PREFIX_2 "[JBLevels]"
 #define XP_INCREMENT_VALUE 1
+#define MIN_LEVEL 1
+#define MAX_LEVEL 100
 
 ConVar g_hDBTableName;
 ConVar g_hDBUpdateInterval;
 ConVar g_hXPUpdateInterval;
 ConVar g_hMinLevelToJoinCT;
+ConVar g_hXPFormulaMultiplier;
 
 char g_sLogPath[256];
-char g_sDBTableName[512];
-float g_fDBUpdateInterval;
-float  g_fXPUpdateInterval;
-int g_iMinLevelToJoinCT;
+char g_sDBTableName[512] = "jblevels";
+float g_fDBUpdateInterval = 300.0;
+float  g_fXPUpdateInterval = 60.0;
+int g_iMinLevelToJoinCT = 5;
+int g_iXPFormulaMultiplier = 2;
 
 Handle g_hClientTimer[MAXPLAYERS+1];
 Handle g_hDatabase = INVALID_HANDLE;
@@ -59,20 +64,27 @@ public Plugin myinfo =
 
 public void OnPluginStart()
 {
+	LoadTranslations("common.phrases");
+	LoadTranslations("jblevels.phrases");
+	
 	g_hDBTableName = CreateConVar("jbl_db_table_name", "jblevels", "Name of the database table in the databases.cfg file", FCVAR_PROTECTED);
-	g_hDBUpdateInterval = CreateConVar("jbl_db_update_interval", "300.0", "Time in seconds between each database update", FCVAR_PROTECTED, true, 120.0, true, 900.0);
-	g_hXPUpdateInterval = CreateConVar("jbl_xp_update_interval", "60.0", "Time in seconds between each player experience increment", FCVAR_PROTECTED, true, 10.0, true, 120.0);
-	g_hMinLevelToJoinCT = CreateConVar("jbl_ct_level", "5", "Lowest level required to join the CT team", _, true, 1.0);
+	g_hDBUpdateInterval = CreateConVar("jbl_db_update_interval", "300.0", "Sets the time in seconds between each database update", FCVAR_PROTECTED, true, 120.0, true, 900.0);
+	g_hXPUpdateInterval = CreateConVar("jbl_xp_update_interval", "60.0", "Sets the time in seconds between each player XP increment", FCVAR_PROTECTED, true, 10.0, true, 120.0);
+	g_hMinLevelToJoinCT = CreateConVar("jbl_ct_level", "5", "Sets the lowest level required to join the CT team", _, true, 1.0);
+	g_hXPFormulaMultiplier = CreateConVar("jbl_leveling_difficulty", "2", "Multiplier of XP required to advance to the next level  (higher equals more time required to level up)", FCVAR_PROTECTED, true, 2.0, true);
 	
 	RegConsoleCmd("sm_mystats", Panel_JBMyStats);
-	RegAdminCmd("sm_playerstats", Command_PlayerStats, ADMFLAG_BAN, "Shows stats for a given player");
+	RegAdminCmd("sm_playerstats", Command_PlayerStats, ADMFLAG_KICK, "Shows stats for a given player");
+	RegAdminCmd("sm_setlevel", Command_SetLevel, ADMFLAG_ROOT, "Sets the targeted player level manually");
+	RegAdminCmd("sm_resetxp", Command_ResetXP, ADMFLAG_ROOT, "Resets the targeted player experience to 0");
+	RegAdminCmd("sm_givexp", Command_GiveXP, ADMFLAG_ROOT, "Gives XP points to the targeted player");
+	RegAdminCmd("sm_resetplayer", Command_ResetPlayer, ADMFLAG_ROOT, "Resets a player level and XP");
 	
 	AddCommandListener(Command_CheckJoin, "jointeam");
 	//HookEvent("player_team", Event_PlayerTeam);
 	
 	AutoExecConfig(true, "jblevels");
 	BuildPath(Path_SM, g_sLogPath, sizeof(g_sLogPath), "logs/jblevels.log");
-	LoadTranslations("common.phrases");
 } 
 
 public void OnConfigsExecuted()
@@ -81,6 +93,7 @@ public void OnConfigsExecuted()
 	g_fDBUpdateInterval = GetConVarFloat(g_hDBUpdateInterval);
 	g_fXPUpdateInterval = GetConVarFloat(g_hXPUpdateInterval);
 	g_iMinLevelToJoinCT = GetConVarInt(g_hMinLevelToJoinCT);
+	g_iXPFormulaMultiplier = GetConVarInt(g_hXPFormulaMultiplier);
 	
 	Initialize();
 	
@@ -120,7 +133,7 @@ public Action Command_CheckJoin(int client, const char[] command, int args)
 
 	if((iTargetTeam == CS_TEAM_CT) && (iPlayerLevel < g_iMinLevelToJoinCT))
 	{
-		CPrintToChat(client, "%s Debes alcanzar el nivel %i antes de ser CT", PLUGIN_CHAT_PREFIX, g_iMinLevelToJoinCT);		
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "ct_required_level", client, g_iMinLevelToJoinCT);
 		return Plugin_Stop;
 	}
 
@@ -131,21 +144,194 @@ public Action Command_PlayerStats(int client, int args)
 { 
 	if (args < 1) 
     { 
-		CPrintToChat(client, "%s {green}Uso: !playerstats <target>", PLUGIN_CHAT_PREFIX); 
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "playerstats_command_usage", client); 
 		return Plugin_Handled; 
     }
 	
-	char szTarget[64]; 
-	GetCmdArg(1, szTarget, sizeof(szTarget));
-	int target = FindTarget(client, szTarget, true);
+	char sTarget[64]; 
+	GetCmdArg(1, sTarget, sizeof(sTarget));
+	int target = FindTarget(client, sTarget, true);
 	
 	if(!IsValidClient(target))
 	{
-		CPrintToChat(client, "%s {green}Jugador no encontrado", PLUGIN_CHAT_PREFIX);
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "player_not_found", client);
 		return Plugin_Handled;
 	}
 	
 	return Panel_JBTargetStats(client, target); 
+}
+
+public Action Command_SetLevel(int client, int args) 
+{ 
+	if (args < 2) 
+    { 
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "set_level_command_usage", client); 
+		return Plugin_Handled; 
+    }
+	
+	char sTarget[64];
+	GetCmdArg(1, sTarget, sizeof(sTarget));
+	int target = FindTarget(client, sTarget, true);
+	
+	if(!IsValidClient(target))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "player_not_found", client);
+		return Plugin_Handled;
+	}
+	
+	char sTargetName[MAXLENGTH_NAME];
+	GetClientName(target, sTargetName, sizeof(sTargetName));
+	char sTargetSteamId[64];
+	GetClientAuthId(target, AuthId_SteamID64, sTargetSteamId, sizeof(sTargetSteamId));
+	
+	char sAdminName[MAXLENGTH_NAME] = "undefined";
+	char sAdminSteamId[64] = "-1";
+	if(IsValidClient(client))
+	{
+		GetClientName(client, sAdminName, sizeof(sAdminName));
+		GetClientAuthId(client, AuthId_SteamID64, sAdminSteamId, sizeof(sAdminSteamId));
+	}
+	
+	char sLevel[32];
+	GetCmdArg(2, sLevel, sizeof(sLevel));
+	int iLevel = StringToInt(sLevel);
+	if(!(MIN_LEVEL<=iLevel<=MAX_LEVEL))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "invalid_level_value", client, MIN_LEVEL, MAX_LEVEL);
+		return Plugin_Handled;
+	}
+	
+	SetPlayerLevel(target, iLevel);
+	
+	LogToFileEx(g_sLogPath, "Admin %s (SteamID: %s) changed %s (SteamID: %s) level to %i", sAdminName, sAdminSteamId, sTargetName, sTargetSteamId, iLevel);
+	
+	return Plugin_Handled; 
+}
+
+public Action Command_ResetXP(int client, int args) 
+{ 
+	if (args < 1) 
+    { 
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "reset_xp_command_usage", client); 
+		return Plugin_Handled; 
+    }
+	
+	char sTarget[64]; 
+	GetCmdArg(1, sTarget, sizeof(sTarget));
+	int target = FindTarget(client, sTarget, true);
+	
+	if(!IsValidClient(target))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "player_not_found", client);
+		return Plugin_Handled;
+	}
+	
+	char sTargetName[MAXLENGTH_NAME];
+	GetClientName(target, sTargetName, sizeof(sTargetName));
+	char sTargetSteamId[64];
+	GetClientAuthId(target, AuthId_SteamID64, sTargetSteamId, sizeof(sTargetSteamId));
+	
+	char sAdminName[MAXLENGTH_NAME] = "undefined";
+	char sAdminSteamId[64] = "-1";
+	if(IsValidClient(client))
+	{
+		GetClientName(client, sAdminName, sizeof(sAdminName));
+		GetClientAuthId(client, AuthId_SteamID64, sAdminSteamId, sizeof(sAdminSteamId));
+	}
+	
+	ResetPlayerXP(target);
+	
+	LogToFileEx(g_sLogPath, "Admin %s (SteamID: %s) reseted %s (SteamID: %s) XP", sAdminName, sAdminSteamId, sTargetName, sTargetSteamId);
+
+	return Plugin_Handled; 
+}
+
+public Action Command_GiveXP(int client, int args) 
+{ 
+	if (args < 2) 
+    { 
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "give_xp_command_usage", client); 
+		return Plugin_Handled; 
+    }
+	
+	char sTarget[64]; 
+	GetCmdArg(1, sTarget, sizeof(sTarget));
+	int target = FindTarget(client, sTarget, true);
+	
+	if(!IsValidClient(target))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "player_not_found", client);
+		return Plugin_Handled;
+	}
+	
+	char sTargetName[MAXLENGTH_NAME];
+	GetClientName(target, sTargetName, sizeof(sTargetName));
+	char sTargetSteamId[64];
+	GetClientAuthId(target, AuthId_SteamID64, sTargetSteamId, sizeof(sTargetSteamId));
+	
+	char sAdminName[MAXLENGTH_NAME] = "undefined";
+	char sAdminSteamId[64] = "-1";
+	if(IsValidClient(client))
+	{
+		GetClientName(client, sAdminName, sizeof(sAdminName));
+		GetClientAuthId(client, AuthId_SteamID64, sAdminSteamId, sizeof(sAdminSteamId));
+	}
+	
+	char sXP[32];
+	GetCmdArg(2, sXP, sizeof(sXP));
+	int iXP = StringToInt(sXP);
+	if(!(1<=iXP))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "invalid_xp_value", client, 1);
+		return Plugin_Handled;
+	}
+	
+	IncrementPlayerXP(target, iXP);
+	if(ShouldLevelUp(target))
+		LevelUp(target);
+	
+	LogToFileEx(g_sLogPath, "Admin %s (SteamID: %s) gave %s (SteamID: %s) %i XP points", sAdminName, sAdminSteamId, sTargetName, sTargetSteamId, iXP);
+	
+	return Plugin_Handled; 
+}
+
+public Action Command_ResetPlayer(int client, int args) 
+{ 
+	if (args < 1) 
+    { 
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "reset_xp_command_usage", client); 
+		return Plugin_Handled; 
+    }
+	
+	char sTarget[64]; 
+	GetCmdArg(1, sTarget, sizeof(sTarget));
+	int target = FindTarget(client, sTarget, true);
+	
+	if(!IsValidClient(target))
+	{
+		CReplyToCommand(client, "%s %T", PLUGIN_CHAT_PREFIX, "player_not_found", client);
+		return Plugin_Handled;
+	}
+	
+	char sTargetName[MAXLENGTH_NAME];
+	GetClientName(target, sTargetName, sizeof(sTargetName));
+	char sTargetSteamId[64];
+	GetClientAuthId(target, AuthId_SteamID64, sTargetSteamId, sizeof(sTargetSteamId));
+	
+	char sAdminName[MAXLENGTH_NAME] = "undefined";
+	char sAdminSteamId[64] = "-1";
+	if(IsValidClient(client))
+	{
+		GetClientName(client, sAdminName, sizeof(sAdminName));
+		GetClientAuthId(client, AuthId_SteamID64, sAdminSteamId, sizeof(sAdminSteamId));
+	}
+	
+	ResetPlayerXP(target);
+	SetPlayerLevel(target, 1);
+	
+	LogToFileEx(g_sLogPath, "Admin %s (SteamID: %s) reseted %s (SteamID: %s) level and XP", sAdminName, sAdminSteamId, sTargetName, sTargetSteamId);
+
+	return Plugin_Handled; 
 }
 
 /*public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
@@ -247,7 +433,7 @@ public Action AddExperienceOnTimePlayed(Handle timer, any userId)
 	IncrementPlayerTimePlayed(client, RoundToFloor(g_fXPUpdateInterval));
 	
 	if(ShouldLevelUp(client)) 
-		levelUp(client);
+		LevelUp(client);
 	
 	return Plugin_Continue;
 }
@@ -517,22 +703,40 @@ void StartXPTimer(int client)
 /* Leveling functions */
 bool ShouldLevelUp(int client)
 {
-	return (GetPlayerXP(client) >= nextLevelXP(GetPlayerLevel(client)));
+	if(GetPlayerLevel(client) == MAX_LEVEL)
+		return false;
+	else
+		return (GetPlayerXP(client) >= NextLevelXP(GetPlayerLevel(client)));
 }
 
-//Returns the amount of XP required to reach the next level
-int nextLevelXP(int lvl)
+//Returns the amount of XP required to advance to the next level.
+//After level 25 the XP cost for leveling up increases linearly.
+int NextLevelXP(int lvl)
 {
-	int formula = ((100+(lvl*lvl))/2);
+	int formula;
+	if(lvl<26)
+		formula = (50+g_iXPFormulaMultiplier*(lvl*lvl))/2;
+	else
+		formula = (50+g_iXPFormulaMultiplier*(625))/2 + lvl*3;
 	return formula;
 }
 
-//Increases a player level and resets his experience
-void levelUp(int client)
+//Increases a player level
+void LevelUp(int client)
 {
-	IncrementPlayerLevel(client, 1);
-	ResetPlayerXP(client);
-	PrintToChat(client, "%s Has subido de nivel!, tu nuevo nivel es: %i", PLUGIN_CHAT_PREFIX, GetPlayerLevel(client));
+	int newLevel = GetPlayerLevel(client);
+	int remainingXP = GetPlayerXP(client) - NextLevelXP(newLevel);
+	newLevel += 1;
+	
+	while(remainingXP >= NextLevelXP(newLevel))
+	{
+		remainingXP -= NextLevelXP(newLevel);
+		newLevel += 1;
+	}
+	
+	SetPlayerLevel(client, newLevel);
+	SetPlayerXP(client, remainingXP);
+	CPrintToChat(client, "%s %T", PLUGIN_CHAT_PREFIX, "level_up", client, GetPlayerLevel(client));
 }
 
 /* Panels */
@@ -547,26 +751,32 @@ public int PanelHandler1(Menu menu, MenuAction action, int param1, int param2)
 public Action Panel_JBMyStats(int client, int args)
 {
 	char sXP[128];
-	Format(sXP, sizeof(sXP), "XP: %i", GetPlayerXP(client));
+	Format(sXP, sizeof(sXP), "%T: %i", "xp", client, GetPlayerXP(client));
 	
 	char sLevel[128];
-	Format(sLevel, sizeof(sLevel), "Nivel: %i", GetPlayerLevel(client));
+	Format(sLevel, sizeof(sLevel), "%T: %i", "level", client, GetPlayerLevel(client));
 	
 	char sFormattedTime[8];
 	FormatTimeCustom(sFormattedTime, sizeof(sFormattedTime), GetPlayerTimePlayed(client));
 	char sTimePlayed[64];
-	Format(sTimePlayed, sizeof(sTimePlayed), "Tiempo de juego total (H:M): %s", sFormattedTime);	
+	Format(sTimePlayed, sizeof(sTimePlayed), "%T: %s", "time_played", client, sFormattedTime);	
 	
 	char sNeededXP[128];
-	Format(sNeededXP, sizeof(sNeededXP), "XP para sig. nivel: %i", nextLevelXP(GetPlayerLevel(client)));	
+	Format(sNeededXP, sizeof(sNeededXP), "%T: %i", "xp_for_next_level", client, NextLevelXP(GetPlayerLevel(client)));
+	
+	char sTitle[128];
+	Format(sTitle, sizeof(sTitle), "%T", "your_stats", client);
+	
+	char sCloseBtn[32];
+	Format(sCloseBtn, sizeof(sCloseBtn), "%T", "close", client); 
 	
 	Panel panel = new Panel();
-	panel.SetTitle("Tus estadisticas:");
+	panel.SetTitle(sTitle);
 	panel.DrawText(sXP);
 	panel.DrawText(sLevel);
 	panel.DrawText(sTimePlayed);
 	panel.DrawText(sNeededXP);
-	panel.DrawItem("Salir");
+	panel.DrawItem(sCloseBtn);
  
 	panel.Send(client, PanelHandler1, 20);
  
@@ -578,23 +788,26 @@ public Action Panel_JBMyStats(int client, int args)
 public Action Panel_JBTargetStats(int client, int target)
 {
 	char sXP[128];
-	Format(sXP, sizeof(sXP), "XP: %i", GetPlayerXP(target));
+	Format(sXP, sizeof(sXP), "%T: %i", "xp", client, GetPlayerXP(target));
 	
 	char sLevel[128];
-	Format(sLevel, sizeof(sLevel), "Nivel: %i", GetPlayerLevel(target));
+	Format(sLevel, sizeof(sLevel), "%T: %i", "level", client, GetPlayerLevel(target));
 	
 	char sFormattedTime[8];
 	FormatTimeCustom(sFormattedTime, sizeof(sFormattedTime), GetPlayerTimePlayed(target));
 	char sTimePlayed[64];
-	Format(sTimePlayed, sizeof(sTimePlayed), "Tiempo de juego total (H:M): %s", sFormattedTime);	
+	Format(sTimePlayed, sizeof(sTimePlayed), "%T: %s", "time_played", client, sFormattedTime);	
 	
 	char sNeededXP[128];
-	Format(sNeededXP, sizeof(sNeededXP), "XP para sig. nivel: %i", nextLevelXP(GetPlayerLevel(target)));	
+	Format(sNeededXP, sizeof(sNeededXP), "%T: %i", "xp_for_next_level", client, NextLevelXP(GetPlayerLevel(target)));	
 	
 	char sTargetName[MAXLENGTH_NAME];
 	GetClientName(target, sTargetName, sizeof(sTargetName));
 	char sTitle[128];
-	Format(sTitle, sizeof(sTitle), "Estadisticas de %s", sTargetName);
+	Format(sTitle, sizeof(sTitle), "%T", "stats_for_player", client, sTargetName);
+	
+	char sCloseBtn[32];
+	Format(sCloseBtn, sizeof(sCloseBtn), "%T", "close", client); 
 	
 	Panel panel = new Panel();
 	panel.SetTitle(sTitle);
@@ -602,7 +815,7 @@ public Action Panel_JBTargetStats(int client, int target)
 	panel.DrawText(sLevel);
 	panel.DrawText(sTimePlayed);
 	panel.DrawText(sNeededXP);
-	panel.DrawItem("Salir");
+	panel.DrawItem(sCloseBtn);
  
 	panel.Send(client, PanelHandler1, 20);
  

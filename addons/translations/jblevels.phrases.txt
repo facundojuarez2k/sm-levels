@@ -1,0 +1,72 @@
+"Phrases"
+{
+	"ct_required_level"
+	{
+		"#format"	"{1:i}"
+		"en"		"You must reach level {1} before joining CT"
+	}
+	"set_level_command_usage"
+	{
+		"en"		"Command usage: !setlevel <target> <level>"
+	}
+	"reset_xp_command_usage"
+	{
+		"en"		"Command usage: !resetxp <target>"
+	}
+	"playerstats_command_usage"
+	{
+		"en"		"Command usage: !playerstats <target>"
+	}
+	"give_xp_command_usage"
+	{
+		"en"		"Command usage: !givexp <target>"
+	}
+	"player_not_found"
+	{
+		"en"		"Player not found"
+	}
+	"level_up"
+	{
+		"#format"	"{1:i}"
+		"en"		"{green}You are now in level {1}!"
+	}
+	"level"
+	{
+		"en"		"Level"
+	}
+	"xp"
+	{
+		"en"		"XP"
+	}
+	"time_played"
+	{
+		"en"		"Total played time"
+	}
+	"xp_for_next_level"
+	{
+		"en"		"XP required for next level"
+	}
+	"your_stats"
+	{
+		"en"		"Your stats:"
+	}
+	"stats_for_player"
+	{
+		"#format"	"{1:s}"
+		"en"		"{1}'s stats"
+	}
+	"close"
+	{
+		"en"		"Close"
+	}
+	"invalid_level_value"
+	{
+		"#format"	"{1:i},{2:i}"
+		"en"		"Invalid level value, it should be between {1} and {2}"
+	}
+	"invalid_xp_value"
+	{
+		"#format"	"{1:i}"
+		"en"		"Invalid XP value, it should be higher than {1}"
+	}
+}
