@@ -1,12 +1,25 @@
+/***********************************************************************************
+	Requires 
+		Chat-Processor: https://forums.alliedmods.net/showthread.php?t=286913
+		Multicolors: https://forums.alliedmods.net/showthread.php?t=247770
+	To do:
+		>Optimize database sync queries
+		>Admin menu
+************************************************************************************/
+
 #pragma semicolon 1
 #pragma newdecls required
 
-#include sourcemod
+#include <sourcemod>
 #include <sdktools>
 #include <cstrike>
+#include <multicolors>
 #include <chat-processor>
 
-#define PLUGIN_VERSION "0.1.1"
+#define PLUGIN_VERSION "0.1.2"
+#define PLUGIN_CHAT_PREFIX "{darkred}[JBLevels]"
+#define PLUGIN_CHAT_PREFIX_2 "[JBLevels]"
+#define XP_INCREMENT_VALUE 1
 
 ConVar g_hDBTableName;
 ConVar g_hDBUpdateInterval;
@@ -26,9 +39,9 @@ Handle g_hAutoUpdateDatabaseTimer;
 /* Player stats struct */
 enum PlayerStats 
 {
-    xp,
-    level,
-    timePlayed,
+	xp,
+	level,
+	timePlayed,
 	lastDBLoadTime,
 	lastDBSaveTime
 }; 
@@ -49,16 +62,18 @@ public void OnPluginStart()
 	g_hDBTableName = CreateConVar("jbl_db_table_name", "jblevels", "Name of the database table in the databases.cfg file", FCVAR_PROTECTED);
 	g_hDBUpdateInterval = CreateConVar("jbl_db_update_interval", "300.0", "Time in seconds between each database update", FCVAR_PROTECTED, true, 120.0, true, 900.0);
 	g_hXPUpdateInterval = CreateConVar("jbl_xp_update_interval", "60.0", "Time in seconds between each player experience increment", FCVAR_PROTECTED, true, 10.0, true, 120.0);
-	g_hMinLevelToJoinCT = CreateConVar("jbl_ct_level", "3", "Lowest level required to join the CT team", _, true, 1.0);
+	g_hMinLevelToJoinCT = CreateConVar("jbl_ct_level", "5", "Lowest level required to join the CT team", _, true, 1.0);
 	
-	RegConsoleCmd("sm_jbstats", Panel_JBStats);
+	RegConsoleCmd("sm_mystats", Panel_JBMyStats);
+	RegAdminCmd("sm_playerstats", Command_PlayerStats, ADMFLAG_BAN, "Shows stats for a given player");
 	
 	AddCommandListener(Command_CheckJoin, "jointeam");
 	//HookEvent("player_team", Event_PlayerTeam);
 	
 	AutoExecConfig(true, "jblevels");
 	BuildPath(Path_SM, g_sLogPath, sizeof(g_sLogPath), "logs/jblevels.log");
-}
+	LoadTranslations("common.phrases");
+} 
 
 public void OnConfigsExecuted()
 {
@@ -68,6 +83,7 @@ public void OnConfigsExecuted()
 	g_iMinLevelToJoinCT = GetConVarInt(g_hMinLevelToJoinCT);
 	
 	Initialize();
+	
 	SQL_TConnect(OnDBConnect, g_sDBTableName);
 }
 
@@ -76,32 +92,60 @@ public void OnMapEnd()
 	SaveAllPlayerStats(true);
 }
 
+public void OnPluginEnd()
+{
+	SaveAllPlayerStats(true);
+}
+
 public Action CP_OnChatMessage(int& author, ArrayList recipients, char[] flagstring, char[] name, char[] message, bool& processcolors, bool& removecolors)
 {
-    Format(name, MAXLENGTH_NAME, "{gold}[%i]{teamcolor}%s", g_iPlayerStats[author][level], name);
+    Format(name, MAXLENGTH_NAME, "{gold}[%i]{teamcolor}%s", GetPlayerLevel(author), name);
     return Plugin_Changed;
 }
 
 public Action Command_CheckJoin(int client, const char[] command, int args)
 {
 	if(!g_hDatabase || !IsValidClient(client))
-	{
 		return Plugin_Continue;
-	}
+	
+	//Admins don't have restrictions
+	if(CheckCommandAccess(client, "", ADMFLAG_KICK))
+		return Plugin_Continue;
 
 	char sJoinTeamString[5];
 	GetCmdArg(1, sJoinTeamString, sizeof(sJoinTeamString));
 	int iTargetTeam = StringToInt(sJoinTeamString);
 
-	int iPlayerLevel = g_iPlayerStats[client][level];
+	int iPlayerLevel = GetPlayerLevel(client);
 
 	if((iTargetTeam == CS_TEAM_CT) && (iPlayerLevel < g_iMinLevelToJoinCT))
 	{
-		PrintToChat(client, "Debes alcanzar el nivel %i antes de ser CT", g_iMinLevelToJoinCT);
+		CPrintToChat(client, "%s Debes alcanzar el nivel %i antes de ser CT", PLUGIN_CHAT_PREFIX, g_iMinLevelToJoinCT);		
 		return Plugin_Stop;
 	}
 
 	return Plugin_Continue;
+}
+
+public Action Command_PlayerStats(int client, int args) 
+{ 
+	if (args < 1) 
+    { 
+		CPrintToChat(client, "%s {green}Uso: !playerstats <target>", PLUGIN_CHAT_PREFIX); 
+		return Plugin_Handled; 
+    }
+	
+	char szTarget[64]; 
+	GetCmdArg(1, szTarget, sizeof(szTarget));
+	int target = FindTarget(client, szTarget, true);
+	
+	if(!IsValidClient(target))
+	{
+		CPrintToChat(client, "%s {green}Jugador no encontrado", PLUGIN_CHAT_PREFIX);
+		return Plugin_Handled;
+	}
+	
+	return Panel_JBTargetStats(client, target); 
 }
 
 /*public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
@@ -125,31 +169,11 @@ public Action Command_CheckJoin(int client, const char[] command, int args)
 	return Plugin_Continue;
 }*/
 
-//Initializes the cache array
-void Initialize()
-{
-	for(int i=1; i<=MaxClients; i++)
-	{
-		if(IsValidClient(i))
-		{
-			InitPlayer(i);
-			StartXPTimer(i);
-		}
-		else{
-			g_iPlayerStats[i][level] = -1;
-			g_iPlayerStats[i][xp] = -1;
-			g_iPlayerStats[i][timePlayed] = -1;
-			g_iPlayerStats[i][lastDBSaveTime] = -1;
-			g_iPlayerStats[i][lastDBLoadTime] = -1;
-		}
-	}
-}
-
 public void OnDBConnect(Handle owner, Handle hndl, char [] error, any data)
 {
 	if(hndl == INVALID_HANDLE)
 	{
-		LogToFileEx(g_sLogPath, "Database failure: %s", error);
+		LogToFileEx(g_sLogPath, "[Database failure]: %s", error);
 		SetFailState("Couldn't connect to database");
 	}
 	else
@@ -159,22 +183,8 @@ public void OnDBConnect(Handle owner, Handle hndl, char [] error, any data)
 		char sQuery[256];
 		//SQL_GetDriverIdent(SQL_ReadDriver(g_hDatabase), sQuery, sizeof(sQuery));
 		Format(sQuery, sizeof(sQuery), "CREATE TABLE IF NOT EXISTS %s (steam_id varchar(32) PRIMARY KEY NOT NULL, level INTEGER, xp INTEGER, time_played INTEGER, last_update INTEGER);", g_sDBTableName);
-		SQL_TQuery(g_hDatabase, DB_OnDBConnectCallback, sQuery);
-		LogToFileEx(g_sLogPath, "Query %s", sQuery);
-	}
-}
-
-public void DB_OnDBConnectCallback(Handle owner, Handle hndl, char [] error, any data)
-{
-	if(hndl == INVALID_HANDLE)
-	{
-		LogToFileEx(g_sLogPath, "Query failure: %s", error);
-	}
-	else
-	{
-		if(g_hAutoUpdateDatabaseTimer == INVALID_HANDLE)
-			g_hAutoUpdateDatabaseTimer = CreateTimer(g_fDBUpdateInterval, AutoUpdateDatabase, _, TIMER_REPEAT);
-		LoadConnectedPlayersStats();
+		SQL_TQuery(g_hDatabase, DB_CreateTable, sQuery);
+		//LogToFileEx(g_sLogPath, "Query %s", sQuery);
 	}
 }
 
@@ -202,7 +212,7 @@ public void OnClientDisconnect(int client)
 	}
 	
 	SavePlayerStats(client, null, true);
-	ClearClientStatsCache(client);
+	ClearPlayerCache(client);
 }
 
 public Action AutoUpdateDatabase(Handle timer)
@@ -226,11 +236,15 @@ public Action AddExperienceOnTimePlayed(Handle timer, any userId)
 {
 	int client = GetClientOfUserId(userId);
 	
+	//Client has disconnected but the timer is still running
 	if(!IsValidClient(client))
-		return Plugin_Stop;
+	{
+		KillClientTimerIfExists(client);
+		return Plugin_Stop;	
+	}
 	
-	g_iPlayerStats[client][xp] = g_iPlayerStats[client][xp] + 1;
-	g_iPlayerStats[client][timePlayed] += RoundToFloor(g_fXPUpdateInterval);
+	IncrementPlayerXP(client, XP_INCREMENT_VALUE);
+	IncrementPlayerTimePlayed(client, RoundToFloor(g_fXPUpdateInterval));
 	
 	if(ShouldLevelUp(client)) 
 		levelUp(client);
@@ -238,31 +252,47 @@ public Action AddExperienceOnTimePlayed(Handle timer, any userId)
 	return Plugin_Continue;
 }
 
-bool ShouldLevelUp(int client)
+//Initializes the cache array
+void Initialize()
 {
-	return (g_iPlayerStats[client][xp] >= nextLevelXP(g_iPlayerStats[client][level]));
-}
-
-int nextLevelXP(int lvl)
-{
-	int formula = ((100+(lvl*lvl))/2);
-	return formula;
-}
-
-void levelUp(int client)
-{
-	g_iPlayerStats[client][level] += 1;
-	g_iPlayerStats[client][xp] = 0;
-	PrintToChat(client, "Has subido de nivel!, tu nuevo nivel es: %i", g_iPlayerStats[client][level]);
+	for(int i=1; i<=MaxClients; i++)
+	{
+		if(IsValidClient(i))
+		{
+			InitPlayer(i);
+			StartXPTimer(i);
+		}
+		else{
+			InitPlayerEmpty(i);
+		}
+	}
 }
 
 void InitPlayer(int client)
 {
-	g_iPlayerStats[client][level] = 1;
-	g_iPlayerStats[client][xp] = 0;
-	g_iPlayerStats[client][timePlayed] = 0;
-	g_iPlayerStats[client][lastDBSaveTime] = -1;
-	g_iPlayerStats[client][lastDBLoadTime] = -1;
+	SetPlayerLevel(client, 1);
+	SetPlayerXP(client, 0);
+	SetPlayerTimePlayed(client, 0);
+	SetPlayerLastDBLoadTime(client, -1);
+	SetPlayerLastDBSaveTime(client, -1);
+}
+
+void InitPlayerEmpty(int client)
+{
+	SetPlayerLevel(client, -1);
+	SetPlayerXP(client, -1);
+	SetPlayerTimePlayed(client, -1);
+	SetPlayerLastDBLoadTime(client, -1);
+	SetPlayerLastDBSaveTime(client, -1);
+}
+
+void ClearPlayerCache(int client)
+{
+	SetPlayerLevel(client, -1);
+	SetPlayerXP(client, -1);
+	SetPlayerTimePlayed(client, -1);
+	SetPlayerLastDBLoadTime(client, -1);
+	SetPlayerLastDBSaveTime(client, -1);
 }
 
 void LoadPlayerStats(int client, Transaction hTransaction=null)
@@ -297,7 +327,7 @@ void LoadConnectedPlayersStats()
 	{
 		if(IsValidClient(i) && IsClientAuthorized(i))
 		{
-			if(g_iPlayerStats[i][lastDBLoadTime] > 0)
+			if(GetPlayerLastDBLoadTime(i) > 0)
 				continue;
 			LoadPlayerStats(i, hTransaction);
 		}
@@ -306,33 +336,26 @@ void LoadConnectedPlayersStats()
 	SQL_ExecuteTransaction(g_hDatabase, hTransaction, SQLTxn_LoadPlayersStats, SQLTxn_LogError);
 }
 
-void InsertNewPlayer(int client)
+bool InsertNewPlayer(int client)
 {
 	if(!g_hDatabase)
-		return;
+		return false;
 
 	if(!IsValidClient(client))
-		return;
+		return false;
 	
 	int iSteamId = GetSteamAccountID(client);
 	if(!iSteamId)
-		return;
+		return false;
 	
 	char sQuery[256];
 	
 	int lastUpdate = GetTime();
-	Format(sQuery, sizeof(sQuery), "INSERT INTO %s (steam_id, level, xp, time_played, last_update) VALUES (%d, %i, %i, %i, %i);", g_sDBTableName, iSteamId, g_iPlayerStats[client][level], g_iPlayerStats[client][xp], g_iPlayerStats[client][timePlayed], lastUpdate);
+	Format(sQuery, sizeof(sQuery), "INSERT INTO %s (steam_id, level, xp, time_played, last_update) VALUES (%d, %i, %i, %i, %i);", g_sDBTableName, iSteamId, GetPlayerLevel(client), GetPlayerXP(client), GetPlayerTimePlayed(client), lastUpdate);
 	
 	SQL_TQuery(g_hDatabase, DB_InsertNewPlayer, sQuery, GetClientUserId(client));
-}
-
-void ClearClientStatsCache(int client)
-{
-	g_iPlayerStats[client][level] = -1;
-	g_iPlayerStats[client][xp] = -1;
-	g_iPlayerStats[client][timePlayed] = -1;
-	g_iPlayerStats[client][lastDBLoadTime] = -1;
-	g_iPlayerStats[client][lastDBSaveTime] = -1;
+	
+	return true;
 }
 
 bool SavePlayerStats(int client, Transaction hTransaction=null, bool manual=false)
@@ -343,10 +366,10 @@ bool SavePlayerStats(int client, Transaction hTransaction=null, bool manual=fals
 	if(!IsValidClient(client))
 		return false;
 
-	if(g_iPlayerStats[client][lastDBLoadTime] < 0)
+	if(GetPlayerLastDBLoadTime(client) < 0)
 		return false;
 	
-	if(!manual && ((GetTime() - g_iPlayerStats[client][lastDBSaveTime]) < g_fDBUpdateInterval))
+	if(!manual && ((GetTime() - GetPlayerLastDBSaveTime(client)) < g_fDBUpdateInterval))
 		return false;	
 	
 	int iSteamId = GetSteamAccountID(client);
@@ -355,8 +378,8 @@ bool SavePlayerStats(int client, Transaction hTransaction=null, bool manual=fals
 	
 	char sQuery[256];
 	
-	g_iPlayerStats[client][lastDBSaveTime] = GetTime();
-	Format(sQuery, sizeof(sQuery), "UPDATE %s SET level = %i, xp = %i, time_played = %i, last_update = %i WHERE steam_id = %d;", g_sDBTableName, g_iPlayerStats[client][level], g_iPlayerStats[client][xp], g_iPlayerStats[client][timePlayed], g_iPlayerStats[client][lastDBSaveTime], iSteamId);
+	SetPlayerLastDBSaveTime(client, GetTime());
+	Format(sQuery, sizeof(sQuery), "UPDATE %s SET level = %i, xp = %i, time_played = %i, last_update = %i WHERE steam_id = %d;", g_sDBTableName, GetPlayerLevel(client), GetPlayerXP(client), GetPlayerTimePlayed(client), GetPlayerLastDBSaveTime(client), iSteamId);
 	
 	if(hTransaction != null)
 		hTransaction.AddQuery(sQuery);
@@ -366,10 +389,10 @@ bool SavePlayerStats(int client, Transaction hTransaction=null, bool manual=fals
 	return true;
 }
 
-void SaveAllPlayerStats(bool manual=false)
+bool SaveAllPlayerStats(bool manual=false)
 {
 	if(g_hDatabase == null)
-		return;
+		return false;
 	
 	Transaction hTransaction = new Transaction();
 	
@@ -380,9 +403,25 @@ void SaveAllPlayerStats(bool manual=false)
 	}
 	
 	SQL_ExecuteTransaction(g_hDatabase, hTransaction, SQLTxn_LogSaveSuccecss, SQLTxn_LogError);
+	
+	return true;
 }
 
 /* SQL Callbacks */
+
+public void DB_CreateTable(Handle owner, Handle hndl, char [] error, any data)
+{
+	if(hndl == INVALID_HANDLE)
+	{
+		LogToFileEx(g_sLogPath, "[Query failure] Error while creating table: %s", error);
+	}
+	else
+	{
+		if(g_hAutoUpdateDatabaseTimer == INVALID_HANDLE)
+			g_hAutoUpdateDatabaseTimer = CreateTimer(g_fDBUpdateInterval, AutoUpdateDatabase, _, TIMER_REPEAT);
+		LoadConnectedPlayersStats();
+	}
+}
 
 public void DB_SavePlayerStats(Handle owner, Handle hndl, char [] error, any userid)
 {
@@ -390,10 +429,9 @@ public void DB_SavePlayerStats(Handle owner, Handle hndl, char [] error, any use
 	{
 		int client = GetClientOfUserId(userid);
 		if(IsValidClient(client))
-			g_iPlayerStats[client][lastDBSaveTime] = -1;
+			SetPlayerLastDBSaveTime(client, -1);
 		
-		LogToFileEx(g_sLogPath, "Query failure on save player stats: %s", error);
-		return;
+		LogToFileEx(g_sLogPath, "[Query failure] Error updating stats for client (SteamID: %d). Message: %s", GetSteamAccountID(client), error);
 	}
 }
 
@@ -405,19 +443,38 @@ public void DB_GetPlayerStats(Handle owner, Handle hndl, char [] error, any user
 	
 	if(hndl == INVALID_HANDLE)
 	{
-		LogToFileEx(g_sLogPath, "Query failure on get player stats: %s", error);
+		LogToFileEx(g_sLogPath, "[Query failure] Error retrieving stats for client (SteamID: %d). Message: %s", GetSteamAccountID(client), error);
 		return;
 	}
 	if(!SQL_GetRowCount(hndl) || !SQL_FetchRow(hndl)) 
 	{
 		InsertNewPlayer(client);
+		LogToFileEx(g_sLogPath, "Client (SteamID: %d) not found in database, inserting new entry", GetSteamAccountID(client));
 		return;
 	}
 	
-	g_iPlayerStats[client][level] = SQL_FetchInt(hndl, 1);
-	g_iPlayerStats[client][xp] = SQL_FetchInt(hndl, 2);
-	g_iPlayerStats[client][timePlayed] = SQL_FetchInt(hndl, 3);
-	g_iPlayerStats[client][lastDBLoadTime] = GetTime();
+	SetPlayerLevel(client, SQL_FetchInt(hndl, 1));
+	SetPlayerXP(client, SQL_FetchInt(hndl, 2));
+	SetPlayerTimePlayed(client, SQL_FetchInt(hndl, 3));
+	SetPlayerLastDBLoadTime(client, GetTime());
+}
+
+public void DB_InsertNewPlayer(Handle owner, Handle hndl, char [] error, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if(!client)
+		return;
+	
+	if(hndl == INVALID_HANDLE)
+	{
+		LogToFileEx(g_sLogPath, "[Query failure] Error inserting new client (SteamID: %d) into database. Message: %s", GetSteamAccountID(client), error);
+		return;
+	}
+	
+	SetPlayerLastDBLoadTime(client, GetTime());
+	SetPlayerLastDBSaveTime(client, GetTime());
+	
+	LogToFileEx(g_sLogPath, "New client with steamid %i inserted into database", GetSteamAccountID(client));
 }
 
 public void SQLTxn_LoadPlayersStats(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
@@ -431,55 +488,54 @@ public void SQLTxn_LoadPlayersStats(Database db, any data, int numQueries, DBRes
 		if(!client) 
 			continue;
 		
-		g_iPlayerStats[client][level] = results[i].FetchInt(1);
-		g_iPlayerStats[client][xp] = results[i].FetchInt(2);
-		g_iPlayerStats[client][timePlayed] = results[i].FetchInt(3);
-		g_iPlayerStats[client][lastDBLoadTime] = GetTime();
+		SetPlayerLevel(client, results[i].FetchInt(1));
+		SetPlayerXP(client, results[i].FetchInt(2));
+		SetPlayerTimePlayed(client, results[i].FetchInt(3));
+		SetPlayerLastDBLoadTime(client, GetTime());
 	}
-}
-
-public void DB_InsertNewPlayer(Handle owner, Handle hndl, char [] error, any userid)
-{
-	int client = GetClientOfUserId(userid);
-	if(!client)
-		return;
-	
-	if(hndl == INVALID_HANDLE)
-	{
-		LogToFileEx(g_sLogPath, "Query failure on insert new player: %s", error);
-		return;
-	}
-	
-	g_iPlayerStats[client][lastDBLoadTime] = GetTime();
-	g_iPlayerStats[client][lastDBSaveTime] = GetTime();
-	
-	LogToFileEx(g_sLogPath, "New player with steamid %i inserted into database", GetSteamAccountID(client));
 }
 
 public void SQLTxn_LogSaveSuccecss(Database db, any data, int numQueries, DBResultSet[] results, any[] queryData)
 {
-	LogToFileEx(g_sLogPath, "Stats for all players updated in database");
+	PrintToServer("Stats for all players have been saved into the database");
 }
 
 public void SQLTxn_LogError(Database db, any data, int numQueries, const char[] error, int failIndex, any[] queryData)
 {
-	LogToFileEx(g_sLogPath, "Error executing query %d of %d queries: %s", failIndex, numQueries, error);
+	LogToFileEx(g_sLogPath, "[Query failure] Error executing query %d of %d queries: %s", failIndex, numQueries, error);
 }
 
 void StartXPTimer(int client)
 {
 	if(IsValidClient(client))
 	{
-		if(g_hClientTimer[client] != INVALID_HANDLE)
-		{
-			CloseHandle(g_hClientTimer[client]);
-			g_hClientTimer[client] = INVALID_HANDLE;	
-		}
+		KillClientTimerIfExists(client);
 		g_hClientTimer[client] = CreateTimer(g_fXPUpdateInterval, AddExperienceOnTimePlayed, GetClientUserId(client), TIMER_REPEAT);
 	}
 }
 
-/* Menu stuff */
+/* Leveling functions */
+bool ShouldLevelUp(int client)
+{
+	return (GetPlayerXP(client) >= nextLevelXP(GetPlayerLevel(client)));
+}
+
+//Returns the amount of XP required to reach the next level
+int nextLevelXP(int lvl)
+{
+	int formula = ((100+(lvl*lvl))/2);
+	return formula;
+}
+
+//Increases a player level and resets his experience
+void levelUp(int client)
+{
+	IncrementPlayerLevel(client, 1);
+	ResetPlayerXP(client);
+	PrintToChat(client, "%s Has subido de nivel!, tu nuevo nivel es: %i", PLUGIN_CHAT_PREFIX, GetPlayerLevel(client));
+}
+
+/* Panels */
 public int PanelHandler1(Menu menu, MenuAction action, int param1, int param2)
 {
 	if (action == MenuAction_End)
@@ -487,23 +543,61 @@ public int PanelHandler1(Menu menu, MenuAction action, int param1, int param2)
 		CloseHandle(menu);
 	}
 }
- 
-public Action Panel_JBStats(int client, int args)
+
+public Action Panel_JBMyStats(int client, int args)
 {
 	char sXP[128];
-	Format(sXP, sizeof(sXP), "XP: %i", g_iPlayerStats[client][xp]);
+	Format(sXP, sizeof(sXP), "XP: %i", GetPlayerXP(client));
 	
 	char sLevel[128];
-	Format(sLevel, sizeof(sLevel), "Nivel: %i", g_iPlayerStats[client][level]);
+	Format(sLevel, sizeof(sLevel), "Nivel: %i", GetPlayerLevel(client));
 	
-	char sTimePlayed[128];
-	Format(sTimePlayed, sizeof(sTimePlayed), "Tiempo jugado (seg): %i", g_iPlayerStats[client][timePlayed]);	
+	char sFormattedTime[8];
+	FormatTimeCustom(sFormattedTime, sizeof(sFormattedTime), GetPlayerTimePlayed(client));
+	char sTimePlayed[64];
+	Format(sTimePlayed, sizeof(sTimePlayed), "Tiempo de juego total (H:M): %s", sFormattedTime);	
 	
 	char sNeededXP[128];
-	Format(sNeededXP, sizeof(sNeededXP), "XP para sig. nivel: %i", nextLevelXP(g_iPlayerStats[client][level]));	
+	Format(sNeededXP, sizeof(sNeededXP), "XP para sig. nivel: %i", nextLevelXP(GetPlayerLevel(client)));	
 	
 	Panel panel = new Panel();
-	panel.SetTitle("Estadisticas:");
+	panel.SetTitle("Tus estadisticas:");
+	panel.DrawText(sXP);
+	panel.DrawText(sLevel);
+	panel.DrawText(sTimePlayed);
+	panel.DrawText(sNeededXP);
+	panel.DrawItem("Salir");
+ 
+	panel.Send(client, PanelHandler1, 20);
+ 
+	delete panel;
+ 
+	return Plugin_Handled;
+}
+
+public Action Panel_JBTargetStats(int client, int target)
+{
+	char sXP[128];
+	Format(sXP, sizeof(sXP), "XP: %i", GetPlayerXP(target));
+	
+	char sLevel[128];
+	Format(sLevel, sizeof(sLevel), "Nivel: %i", GetPlayerLevel(target));
+	
+	char sFormattedTime[8];
+	FormatTimeCustom(sFormattedTime, sizeof(sFormattedTime), GetPlayerTimePlayed(target));
+	char sTimePlayed[64];
+	Format(sTimePlayed, sizeof(sTimePlayed), "Tiempo de juego total (H:M): %s", sFormattedTime);	
+	
+	char sNeededXP[128];
+	Format(sNeededXP, sizeof(sNeededXP), "XP para sig. nivel: %i", nextLevelXP(GetPlayerLevel(target)));	
+	
+	char sTargetName[MAXLENGTH_NAME];
+	GetClientName(target, sTargetName, sizeof(sTargetName));
+	char sTitle[128];
+	Format(sTitle, sizeof(sTitle), "Estadisticas de %s", sTargetName);
+	
+	Panel panel = new Panel();
+	panel.SetTitle(sTitle);
 	panel.DrawText(sXP);
 	panel.DrawText(sLevel);
 	panel.DrawText(sTimePlayed);
@@ -519,11 +613,20 @@ public Action Panel_JBStats(int client, int args)
 
 /* Helper functions */
 
+void KillClientTimerIfExists(int client)
+{
+	if(g_hClientTimer[client] != INVALID_HANDLE)
+	{
+		CloseHandle(g_hClientTimer[client]);
+		g_hClientTimer[client] = INVALID_HANDLE;	
+	}
+}
+
 int GetClientOfSteamId(int steamId)
 {
 	for(int i=1; i<=MaxClients; i++)
 	{
-		if(steamId == GetSteamAccountID(i))
+		if(IsValidClient(i) && steamId == GetSteamAccountID(i))
 			return i;
 	}
 	return -1;
@@ -546,4 +649,137 @@ int GetPlayerCount()
 			players++;
 	}
 	return players;
+}
+
+void FormatTimeCustom(char[] buffer, int bufferSize, int iTime)
+{
+	if(iTime<0)
+		return;
+	
+	int iHrs = iTime / 3600;
+	int iMin = iTime % 3600 / 60;
+	
+	char sHrs[4];
+	char sMin[4];
+	
+	if(iHrs<10)
+		Format(sHrs, sizeof(sHrs), "0%i", iHrs);
+	else
+		Format(sHrs, sizeof(sHrs), "%i", iHrs);
+	
+	if(iMin<10)
+		Format(sMin, sizeof(sMin), "0%i", iMin);
+	else
+		Format(sMin, sizeof(sMin), "%i", iMin);
+	
+	Format(buffer, bufferSize, "%s:%s", sHrs, sMin);
+}
+
+//Setters & Getters for players array
+
+int GetPlayerXP(int client)
+{
+	if(!client)
+		return -1;
+	return g_iPlayerStats[client][xp];
+}
+
+int GetPlayerLevel(int client)
+{
+	if(!client)
+		return -1;
+	return g_iPlayerStats[client][level];
+}
+
+int GetPlayerTimePlayed(int client)
+{
+	if(!client)
+		return -1;
+	return g_iPlayerStats[client][timePlayed];
+}
+
+int GetPlayerLastDBLoadTime(int client)
+{
+	if(!client)
+		return -1;
+	return g_iPlayerStats[client][lastDBLoadTime];
+}
+
+int GetPlayerLastDBSaveTime(int client)
+{
+	if(!client)
+		return -1;
+	return g_iPlayerStats[client][lastDBSaveTime];
+}
+
+bool SetPlayerXP(int client, int newXP)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][xp] = newXP;
+	return true;
+}
+
+bool SetPlayerLevel(int client, int lvl)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][level] = lvl;
+	return true;
+}
+
+bool SetPlayerTimePlayed(int client, int time)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][timePlayed] = time;
+	return true;
+}
+
+bool SetPlayerLastDBLoadTime(int client, int time)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][lastDBLoadTime] = time;
+	return true;
+}
+
+bool SetPlayerLastDBSaveTime(int client, int time)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][lastDBSaveTime] = time;
+	return true;
+}
+
+bool IncrementPlayerLevel(int client, int levels)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][level] += levels;
+	return true;
+}
+
+bool IncrementPlayerXP(int client, int XPToAdd)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][xp] += XPToAdd;
+	return true;
+}
+
+bool IncrementPlayerTimePlayed(int client, int timeToAdd)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][timePlayed] += timeToAdd;
+	return true;
+}
+
+bool ResetPlayerXP(int client)
+{
+	if(!client)
+		return false;
+	g_iPlayerStats[client][xp] = 0;
+	return true;
 }
